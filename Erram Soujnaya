@@ -1,0 +1,96 @@
+import requests
+import csv
+import argparse
+import re
+from typing import List, Dict, Optional
+
+PUBMED_API_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+PUBMED_SUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+
+# Heuristic for non-academic affiliation
+NON_ACADEMIC_KEYWORDS = ["pharma", "biotech", "inc", "corp", "ltd", "gmbh"]
+
+
+def fetch_pubmed_ids(query: str) -> List[str]:
+    params = {"db": "pubmed", "term": query, "retmode": "json"}
+    response = requests.get(PUBMED_API_URL, params=params)
+    response.raise_for_status()
+    data = response.json()
+    return data.get("esearchresult", {}).get("idlist", [])
+
+
+def fetch_paper_details(pubmed_ids: List[str]) -> List[Dict[str, str]]:
+    params = {"db": "pubmed", "id": ",".join(pubmed_ids), "retmode": "json"}
+    response = requests.get(PUBMED_SUMMARY_URL, params=params)
+    response.raise_for_status()
+    data = response.json().get("result", {})
+
+    papers = []
+    for pid in pubmed_ids:
+        paper = data.get(pid, {})
+        papers.append({
+            "PubmedID": pid,
+            "Title": paper.get("title", "N/A"),
+            "Publication Date": paper.get("pubdate", "N/A"),
+            "Authors": paper.get("authors", []),
+        })
+    return papers
+
+
+def extract_non_academic_authors(authors: List[Dict[str, str]]) -> (List[str], List[str]):
+    non_academic_authors = []
+    company_affiliations = []
+
+    for author in authors:
+        affiliation = author.get("affiliation", "").lower()
+        if any(keyword in affiliation for keyword in NON_ACADEMIC_KEYWORDS):
+            non_academic_authors.append(author.get("name", "Unknown"))
+            company_affiliations.append(affiliation)
+    return non_academic_authors, company_affiliations
+
+
+def save_to_csv(papers: List[Dict[str, str]], filename: str) -> None:
+    with open(filename, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=[
+            "PubmedID", "Title", "Publication Date", "Non-academic Author(s)",
+            "Company Affiliation(s)", "Corresponding Author Email"
+        ])
+        writer.writeheader()
+        for paper in papers:
+            writer.writerow(paper)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Fetch research papers from PubMed.")
+    parser.add_argument("query", type=str, help="PubMed search query")
+    parser.add_argument("-f", "--file", type=str, help="Output CSV filename", default="output.csv")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
+    args = parser.parse_args()
+
+    try:
+        pubmed_ids = fetch_pubmed_ids(args.query)
+        if args.debug:
+            print(f"Fetched PubMed IDs: {pubmed_ids}")
+
+        papers = fetch_paper_details(pubmed_ids)
+        results = []
+
+        for paper in papers:
+            non_academic_authors, company_affiliations = extract_non_academic_authors(paper["Authors"])
+            results.append({
+                "PubmedID": paper["PubmedID"],
+                "Title": paper["Title"],
+                "Publication Date": paper["Publication Date"],
+                "Non-academic Author(s)": "; ".join(non_academic_authors),
+                "Company Affiliation(s)": "; ".join(company_affiliations),
+                "Corresponding Author Email": "N/A"  # Placeholder for now
+            })
+
+        save_to_csv(results, args.file)
+        print(f"Results saved to {args.file}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+if __name__ == "__main__":
+    main()
